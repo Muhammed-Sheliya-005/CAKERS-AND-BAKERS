@@ -3,7 +3,15 @@ import { ImagePlus, LoaderCircle, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { trpc } from "../lib/trpc";
 
-const MAX_BYTES = 4 * 1024 * 1024;
+const DEFAULT_MAX_BYTES = 4 * 1024 * 1024;
+const MAX_BYTES =
+  typeof window === "undefined"
+    ? DEFAULT_MAX_BYTES
+    : window.__MANUS_CONFIG__?.productImageUploadMaxBytes ?? DEFAULT_MAX_BYTES;
+const MAX_MB = new Intl.NumberFormat("en-US", {
+  maximumFractionDigits: 1,
+}).format(MAX_BYTES / (1024 * 1024));
+
 function fileAsBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -31,7 +39,8 @@ export default function AdminImageUpload({
     if (!file) return;
     setFileName("");
     try {
-      if (file.size > MAX_BYTES) throw new Error("Choose an image under 4 MB.");
+      if (file.size > MAX_BYTES)
+        throw new Error(`Choose an image under ${MAX_MB} MB.`);
       if (!["image/jpeg", "image/png", "image/webp"].includes(file.type))
         throw new Error("Use a JPEG, PNG or WebP image.");
       const result = await upload.mutateAsync({
@@ -40,19 +49,16 @@ export default function AdminImageUpload({
       });
       onChange(result.imageUrl);
       setFileName(file.name);
-      toast.success(
-        "Your image is saved to the bakery’s secure media storage."
-      );
+      toast.success("Your image is saved to the bakery’s secure media storage.");
     } catch (error) {
       toast.error(
-        error instanceof Error
-          ? error.message
-          : "The image could not be uploaded."
+        error instanceof Error ? error.message : "The image could not be uploaded."
       );
     } finally {
       event.target.value = "";
     }
   };
+
   return (
     <div className="admin-image-upload">
       <div className="admin-image-preview">
@@ -63,7 +69,7 @@ export default function AdminImageUpload({
         )}
       </div>
       <div className="admin-image-upload-copy">
-        <span className="product-kicker">PRODUCT PHOTO · MAX 4 MB</span>
+        <span className="product-kicker">PRODUCT PHOTO · MAX {MAX_MB} MB</span>
         <label
           className={`button button-outline button-small ${upload.isPending ? "upload-disabled" : ""}`}
         >

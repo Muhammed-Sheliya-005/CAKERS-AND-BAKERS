@@ -969,14 +969,14 @@ export const appRouter = router({
     uploadProductImage: adminProcedure
       .input(
         z.object({
-          contentType: z.enum(["image/jpeg", "image/png", "image/webp"]),
-          base64: z
-            .string()
-            .min(4)
-            .max(5_600_000)
-            .regex(/^[A-Za-z0-9+/]+={0,2}$/),
-        })
-      )
+        contentType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+        base64: z
+          .string()
+          .min(4)
+          .max(process.env.VERCEL ? 3_500_000 : 5_600_000)
+          .regex(/^[A-Za-z0-9+/]+={0,2}$/),
+      })
+    )
       .mutation(async ({ input }) => {
         if (!ENV.forgeApiUrl || !ENV.forgeApiKey)
           throw new TRPCError({
@@ -985,14 +985,16 @@ export const appRouter = router({
               "Managed media storage is unavailable. Use an existing HTTPS image URL instead.",
           });
         const bytes = Buffer.from(input.base64, "base64");
+        const maxImageBytes = process.env.VERCEL ? 2_621_440 : 4 * 1024 * 1024;
+        const maxImageLabel = process.env.VERCEL ? "2.5 MB" : "4 MB";
         if (
           !bytes.length ||
-          bytes.length > 4 * 1024 * 1024 ||
+          bytes.length > maxImageBytes ||
           bytes.toString("base64") !== input.base64
         )
           throw new TRPCError({
             code: "BAD_REQUEST",
-            message: "Choose a valid image under 4 MB.",
+            message: `Choose a valid image under ${maxImageLabel}.`,
           });
         const isValid =
           input.contentType === "image/png"

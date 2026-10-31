@@ -14,7 +14,7 @@ A responsive, database-backed cake-shop mini-project built on the initialized Ma
 - Protected vendor dashboard with live database-derived overview, date-filtered sales/status reports, real charts and CSV export; cake/product and offer management; customer history and private notes; general/custom enquiry queues; review moderation; and searchable paginated orders.
 - Audited order transitions with cancellation reasons and cake-stock restoration, printed kitchen copies, a manual offline receipts/refunds ledger (including balance and payment status), ingredient/packaging inventory, product/variant stock movement history, low-stock notifications, and persistent bakery/checkout settings.
 - Owner-authorized OAuth staff access: the configured project owner is the initial administrator and only the owner can grant or revoke staff access. There are no built-in demo passwords or public admin registration.
-- Protected product-image upload for JPEG, PNG and WebP (up to 4 MB), with server-side file-signature validation and stable managed storage paths.
+- Protected product-image upload for JPEG, PNG and WebP (up to 4 MiB on Manus/container and 2.5 MiB on Vercel), with server-side file-signature validation and stable managed storage paths.
 - Demonstration checkout methods are **Cash on Delivery** and **Pay at Store** only. No online payment processor is integrated and no online charge occurs.
 
 ## Requirements
@@ -51,10 +51,18 @@ The dashboard notification area polls for new activity rather than claiming push
 
 ## Routes
 
-`/`, `/shop`, `/categories`, `/today-special`, `/product/:slug`, `/cart`, `/checkout`, `/order-confirmation/:orderCode`, `/track-order`, `/custom-cake`, `/account`, and `/admin`.
+`/`, `/shop`, `/categories`, `/today-special`, `/product/:slug`, `/cart`, `/checkout`, `/order-confirmation/:orderCode`, `/track-order`, `/custom-cake`, `/contact`, `/account`, and `/admin`.
 
 The page manifest lives at `client/public/manus-routes.json` (Vite's configured public directory) and is intentionally separate from the `/api/*` service endpoints.
 
 ## Deployment notes
 
 For a managed release, build with `pnpm build` and start with `pnpm start`; the server honors `PORT` and exposes `/api/health` for readiness. Supply the managed MySQL `DATABASE_URL` and Manus OAuth/runtime values at runtime, never in the browser bundle or image. Apply checked-in migrations with `pnpm db:migrate` before serving the new version; reserve `pnpm seed` for a demonstration database. Keep business/order records in MySQL and uploaded product media in managed storage, not the temporary container filesystem. This project has no online payment gateway or outbound customer-email provider; receipts/refunds are manually recorded and notifications are shown in the dashboard.
+
+## Vercel deployment
+
+This repository now deploys as a full-stack Express application. Import `Muhammed-Sheliya-005/CAKERS-AND-BAKERS` with the repository root as **Root Directory**. `vercel.json` selects the supported **Express** framework preset, runs `pnpm build`, and sets `outputDirectory` to `null` so the earlier `dist/public` static-only override is cleared in favor of automatic Express detection. The root `index.ts` exports the shared Express app; the build copies Vite output from `dist/public` into the root `public/` directory for Vercel's static layer. Known client page routes receive the SPA document; API paths and missing files keep real errors. The existing `server/_core/index.ts`, `pnpm start`, `PORT`, and Docker build remain available for Manus/container hosting.
+
+In Vercel Project Settings → Environment Variables, set `DATABASE_URL`, `MANUS_PROJECT_ID`, `MANUS_JWT_SECRET`, `MANUS_OAUTH_API_URL`, `MANUS_OAUTH_PORTAL_URL`, `MANUS_API_URL`, and `MANUS_API_KEY` for the environments you deploy. The `.env.example` lists names only: Vercel does not inherit Manus-managed secrets automatically. `DATABASE_URL` must be reachable from Vercel; if it points to a newly provisioned database, apply migrations with `pnpm db:migrate` before deploying. `MANUS_API_KEY` is server-only and enables existing managed image uploads/reads. `MANUS_API_BROWSER_KEY`, if required by browser-facing Manus services, is passed only through the existing public runtime-config whitelist. If the Vercel database does not already contain the authorized owner account, also set `OWNER_OPEN_ID` to that owner's existing OAuth `openId`; never promote the first arbitrary visitor.
+
+Allow this exact OAuth callback with the Manus OAuth provider: `https://cakers-and-bakers.vercel.app/api/oauth/callback`. After adding or changing environment values, redeploy the latest GitHub `main` commit from Vercel → Deployments → Redeploy. Verify `https://cakers-and-bakers.vercel.app/api/health` returns HTTP 200 and the storefront loads products. A 404 from `/api/health` means the Express framework preset or static Output Directory override is still wrong; a 200 health response with a cake-counter error means check the Vercel function logs and its `DATABASE_URL`/runtime environment. Vercel's 4.5 MB function body ceiling is why image uploads are capped at 2.5 MiB there; Manus/container keeps the 4 MiB cap.
