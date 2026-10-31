@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
@@ -14,7 +15,8 @@ import OrderConfirmation from "./pages/OrderConfirmation";
 import TrackOrder from "./pages/TrackOrder";
 import CustomCake from "./pages/CustomCake";
 import Account from "./pages/Account";
-import Admin from "./pages/Admin";
+import Contact from "./pages/Contact";
+const Admin = lazy(() => import("@/pages/Admin"));
 
 function StoreRouter() {
   return (
@@ -33,6 +35,7 @@ function StoreRouter() {
         />
         <Route path="/track-order" component={TrackOrder} />
         <Route path="/custom-cake" component={CustomCake} />
+        <Route path="/contact" component={Contact} />
         <Route path="/account" component={Account} />
         <Route component={NotFound} />
       </Switch>
@@ -43,7 +46,13 @@ function StoreRouter() {
 function Router() {
   return (
     <Switch>
-      <Route path="/admin" component={Admin} />
+      <Route path="/admin">
+        {() => (
+          <Suspense fallback={<div className="loading-state">Opening the bakery workspace…</div>}>
+            <Admin />
+          </Suspense>
+        )}
+      </Route>
       <Route component={StoreRouter} />
     </Switch>
   );

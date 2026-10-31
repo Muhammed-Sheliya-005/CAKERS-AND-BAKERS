@@ -28,6 +28,16 @@ import { startLogin } from "../const";
 import { useAuth } from "../_core/hooks/useAuth";
 import AdminCustomers from "../components/AdminCustomers";
 import AdminImageUpload from "../components/AdminImageUpload";
+import { AdminCategoryManager, AdminVariantManager } from "../components/admin/AdminCatalogOptions";
+import AdminContactEnquiries from "../components/admin/AdminContactEnquiries";
+import AdminInventory from "../components/admin/AdminInventory";
+import AdminNotifications from "../components/admin/AdminNotifications";
+import AdminOrders from "../components/admin/AdminOrders";
+import AdminOverview from "../components/admin/AdminOverview";
+import AdminPayments from "../components/admin/AdminPayments";
+import AdminReports from "../components/admin/AdminReports";
+import AdminSettings from "../components/admin/AdminSettings";
+import AdminTeam from "../components/admin/AdminTeam";
 import BrandMark from "../components/BrandMark";
 import { trpc } from "../lib/trpc";
 import { formatDate, formatRupees } from "../lib/shop";
@@ -38,18 +48,38 @@ type Tab =
   | "products"
   | "orders"
   | "customers"
+  | "payments"
+  | "inventory"
+  | "variants"
   | "offers"
+  | "customCakes"
   | "enquiries"
-  | "reviews";
+  | "reviews"
+  | "reports"
+  | "settings"
+  | "team";
 const tabs: Array<{ id: Tab; label: string; icon: typeof CakeSlice }> = [
   { id: "overview", label: "Overview", icon: ClipboardList },
   { id: "products", label: "Products", icon: CakeSlice },
   { id: "orders", label: "Orders", icon: ShoppingBag },
   { id: "customers", label: "Customers", icon: Users },
+  { id: "payments", label: "Payments", icon: Tag },
+  { id: "inventory", label: "Inventory", icon: PackageCheck },
+  { id: "variants", label: "Sizes & categories", icon: CakeSlice },
   { id: "offers", label: "Special offers", icon: Tag },
-  { id: "enquiries", label: "Custom cakes", icon: MessageCircle },
+  { id: "customCakes", label: "Custom cakes", icon: MessageCircle },
+  { id: "enquiries", label: "Enquiries", icon: MessageCircle },
   { id: "reviews", label: "Reviews", icon: Star },
+  { id: "reports", label: "Reports", icon: ArrowUpRight },
+  { id: "settings", label: "Business settings", icon: ShieldCheck },
+  { id: "team", label: "Staff access", icon: Users },
 ];
+function initialTab(): Tab {
+  const value = new URLSearchParams(window.location.search).get("tab");
+  const aliases: Record<string, Tab> = { "custom-cakes": "customCakes" };
+  const tab = aliases[value ?? ""] ?? value;
+  return tabs.some(item => item.id === tab) ? (tab as Tab) : "overview";
+}
 function AdminGate({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
   if (loading)
@@ -81,7 +111,7 @@ function AdminGate({ children }: { children: ReactNode }) {
         </Link>
       </div>
     );
-  if (user.role !== "admin")
+  if (user.role !== "admin" && user.role !== "staff")
     return (
       <div className="admin-gate">
         <span className="admin-gate-icon">
@@ -92,8 +122,8 @@ function AdminGate({ children }: { children: ReactNode }) {
           This area is for the <em>bakery team.</em>
         </h1>
         <p>
-          Your signed-in account does not have administrator access. Customer
-          accounts cannot open the management workspace.
+            Your signed-in customer account does not have bakery-team access.
+            Only the project owner can grant staff privileges.
         </p>
         <Link href="/" className="button button-outline">
           Back to the shop
@@ -105,7 +135,14 @@ function AdminGate({ children }: { children: ReactNode }) {
 
 export default function Admin() {
   const { user, logout } = useAuth();
-  const [activeTab, setActiveTab] = useState<Tab>("overview");
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab);
+  const [globalSearch, setGlobalSearch] = useState("");
+  const [ordersSearch, setOrdersSearch] = useState("");
+  const submitSearch = (event: FormEvent) => {
+    event.preventDefault();
+    setOrdersSearch(globalSearch.trim());
+    setActiveTab("orders");
+  };
   return (
     <AdminGate>
       <div className="admin-shell">
@@ -140,7 +177,7 @@ export default function Admin() {
               <span>{user?.name?.[0] || "C"}</span>
               <div>
                 <b>{user?.name || "Bakery admin"}</b>
-                <small>Authorised administrator</small>
+            <small>Authorised {user?.role === "staff" ? "bakery staff" : "administrator"}</small>
               </div>
             </div>
             <button className="admin-signout" onClick={() => void logout()}>
@@ -157,20 +194,30 @@ export default function Admin() {
               <span className="eyebrow">CAKERS & CAKERS / ADMIN</span>
               <h1>{tabs.find(tab => tab.id === activeTab)?.label}</h1>
             </div>
-            <Link href="/" className="admin-visit">
-              Visit shop <ExternalLink size={14} />
-            </Link>
+            <div className="admin-topbar-actions">
+              <form className="admin-global-search" onSubmit={submitSearch}>
+                <Search size={16} />
+                <input value={globalSearch} onChange={event => setGlobalSearch(event.target.value)} placeholder="Search orders, customers…" aria-label="Search orders by ID, customer or phone" />
+              </form>
+              <AdminNotifications onNavigate={tab => setActiveTab(tab)} />
+              <Link href="/" className="admin-visit">Visit shop <ExternalLink size={14} /></Link>
+            </div>
           </header>
           <div className="admin-content">
-            {activeTab === "overview" && (
-              <Overview onViewOrders={() => setActiveTab("orders")} />
-            )}
+            {activeTab === "overview" && <AdminOverview onViewOrders={() => setActiveTab("orders")} />}
             {activeTab === "products" && <ProductsManager />}
-            {activeTab === "orders" && <OrdersManager />}
+            {activeTab === "variants" && <><AdminVariantManager /><AdminCategoryManager /></>}
+            {activeTab === "orders" && <AdminOrders initialSearch={ordersSearch} onPayments={() => setActiveTab("payments")} />}
             {activeTab === "customers" && <AdminCustomers />}
+            {activeTab === "payments" && <AdminPayments />}
+            {activeTab === "inventory" && <AdminInventory />}
             {activeTab === "offers" && <OffersManager />}
-            {activeTab === "enquiries" && <EnquiriesManager />}
+            {activeTab === "customCakes" && <EnquiriesManager />}
+            {activeTab === "enquiries" && <AdminContactEnquiries />}
             {activeTab === "reviews" && <ReviewsManager />}
+            {activeTab === "reports" && <AdminReports />}
+            {activeTab === "settings" && <AdminSettings />}
+            {activeTab === "team" && <AdminTeam />}
           </div>
         </main>
       </div>
@@ -327,6 +374,10 @@ type ProductRow = {
     isAvailable: boolean;
     isNew: boolean;
     isFeatured: boolean;
+    eggOption: "eggless" | "contains_egg" | "choice";
+    customizationOptions: string | null;
+    preparationMinutes: number;
+    advanceOrderHours: number;
   };
   categoryName: string | null;
 };
@@ -341,6 +392,10 @@ type EditorState = {
   isAvailable: boolean;
   isNew: boolean;
   isFeatured: boolean;
+  eggOption: "eggless" | "contains_egg" | "choice";
+  customizationOptions: string;
+  preparationMinutes: string;
+  advanceOrderHours: string;
 };
 const emptyEditor = (categoryId = 0): EditorState => ({
   categoryId,
@@ -353,6 +408,10 @@ const emptyEditor = (categoryId = 0): EditorState => ({
   isAvailable: true,
   isNew: false,
   isFeatured: false,
+  eggOption: "choice",
+  customizationOptions: "",
+  preparationMinutes: "240",
+  advanceOrderHours: "24",
 });
 function productEditor(product: ProductRow["product"]): EditorState {
   return {
@@ -366,6 +425,10 @@ function productEditor(product: ProductRow["product"]): EditorState {
     isAvailable: product.isAvailable,
     isNew: product.isNew,
     isFeatured: product.isFeatured,
+    eggOption: product.eggOption,
+    customizationOptions: product.customizationOptions ?? "",
+    preparationMinutes: String(product.preparationMinutes),
+    advanceOrderHours: String(product.advanceOrderHours),
   };
 }
 function ProductsManager() {
@@ -401,6 +464,8 @@ function ProductsManager() {
         categoryId: Number(form.categoryId),
         priceRupees: Number(form.priceRupees),
         stock: Number(form.stock),
+        preparationMinutes: Number(form.preparationMinutes),
+        advanceOrderHours: Number(form.advanceOrderHours),
       };
       if (editing)
         await update.mutateAsync({ id: editing.product.id, ...payload });
@@ -528,6 +593,17 @@ function ProductsManager() {
                 onChange={e => setForm({ ...form, stock: e.target.value })}
               />
             </label>
+            <label>
+              Dietary option
+              <select value={form.eggOption} onChange={e => setForm({ ...form, eggOption: e.target.value as EditorState["eggOption"] })}>
+                <option value="choice">Egg or eggless on request</option>
+                <option value="eggless">Eggless</option>
+                <option value="contains_egg">Contains egg</option>
+              </select>
+            </label>
+            <label>Preparation time (minutes)<input required type="number" min="0" max="10080" value={form.preparationMinutes} onChange={e => setForm({ ...form, preparationMinutes: e.target.value })} /></label>
+            <label>Advance order (hours)<input required type="number" min="0" max="720" value={form.advanceOrderHours} onChange={e => setForm({ ...form, advanceOrderHours: e.target.value })} /></label>
+            <label className="full-span">Cake customisation options (optional)<textarea maxLength={2000} rows={2} value={form.customizationOptions} onChange={e => setForm({ ...form, customizationOptions: e.target.value })} placeholder="Message plaque, colour choices, decoration notes…" /></label>
             <div className="full-span">
               <span className="admin-field-label">PRODUCT PHOTOGRAPH</span>
               <AdminImageUpload

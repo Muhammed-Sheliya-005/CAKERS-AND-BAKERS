@@ -39,3 +39,27 @@ Use the starter's actual Manus OAuth identity/session flow for authenticated acc
 - **Brand essence:** a joyful neighbourhood patisserie for everyday celebrations, distinguished by made-fresh cakes and easy personal ordering. Personality: warm, polished, celebratory.
 - **Brand voice:** inviting and sensory, concise in transactional UI. Examples: “A little cake, a lot of joy.” “Made fresh for the moment you’re celebrating.”
 - **Wordmark/logo:** a custom “C” formed from a piped frosting swirl beside a petite cake-slice/flower mark; use a refined typographic wordmark, not generated lettering.
+
+
+## Vendor dashboard extension — approved implementation plan
+
+Extend the existing Cake Shop rather than creating a second application. Preserve React/TypeScript/Vite, Express/tRPC, Drizzle and the managed MySQL source of truth. Continue using the real Manus OAuth session: the configured owner is the initial administrator; only that owner can grant or revoke staff access. Do not introduce passwords, demo credentials, a public admin-registration path, fake users, or simulated gateway payments. Every privileged API remains server-authorized.
+
+Add an additive MySQL migration for staff role access, customer-only notes, order fulfilment/payment status and audit history, payment records, ingredient inventory and movement history, website enquiries, internal enquiry notes, durable business settings and admin notifications. Keep product/order snapshots immutable. Payment reports will distinguish order value from confirmed offline receipts and refunds; cancelled or unpaid orders will not count as collected revenue. Product availability and order totals continue to be validated by the server, and business settings will be shared with the public contact/checkout surfaces where appropriate.
+
+Keep the bakery timezone fixed at `Asia/Kolkata` and validate that its registered address remains in Jogeshwari West, Mumbai. Permit legitimate refunds after cancellation, keep cancelled-order receipt/refund records visible for reconciliation, and continue excluding cancelled orders from collected-revenue totals.
+
+The `/admin` workspace will gain owner/staff management, data-backed overview and reports, searchable/filtered order and offline-payment workflow, product/category options, customer history and private notes, ingredient stock adjustments, general/custom enquiry queues, notification polling, and persistent business-profile/order-preference settings. Order transitions will be constrained and audited. The customer site gains a real general-contact enquiry submission route, reads public business details from settings, and respects order/fulfilment preferences; its catalogue and existing checkout/authentication remain intact.
+
+### Extension structure
+
+- `drizzle/schema.ts`, additive `drizzle/NNNN_*.sql`, journal and snapshot — payment/audit, inventory, enquiry, notification, settings, product options and staff records.
+- `server/routers.ts` plus `server/admin-operations.ts` — existing commerce APIs plus role-guarded analytics, payment, inventory, settings, staff and notification procedures; public contact/settings procedures.
+- `client/src/pages/Admin.tsx` — retains the current admin gate and workspace shell while routing to section components.
+- `client/src/components/admin/` — focused overview, analytics, orders/payments, inventory, contact enquiries, business settings and team panels; shared reusable filters, status and empty/error states.
+- `client/src/pages/Contact.tsx`, `client/src/components/SiteLayout.tsx`, `client/src/pages/CartCheckout.tsx`, product/cart modules and `client/public/manus-routes.json` — customer-facing integration with the same records and configured business profile.
+- `README.md`, `.env.example`, `TODO.md` and this plan — secure setup, migration/seed/run commands, deployment and explicit outcome tracking.
+
+### Dashboard visual system
+
+Reuse the approved contemporary-patisserie identity rather than restyling the shop: warm cream paper and white surfaces, cocoa-brown text, signature rose `#BD5A70` and restrained antique-gold accents. Keep a persistent quiet sidebar on desktop, compact sticky navigation on small screens, a concise title/search/notification/profile top bar, restrained card borders/shadows, readable data tables, clear status badges, keyboard-visible focus, and charts that use real database results. Use cake imagery only for product data; avoid decorative dashboard illustrations. Motion remains subtle and respects reduced-motion preferences.

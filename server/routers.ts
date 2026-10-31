@@ -16,17 +16,29 @@ import {
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import {
+  adminNotifications,
+  businessSettings,
   categories,
   customCakeEnquiries,
   offers,
   orderItems,
   orders,
+  orderStatusHistory,
+  paymentRecords,
   orderStatusValues,
   products,
+  productStockMovements,
   reviews,
   users,
 } from "../drizzle/schema";
 import { getDb } from "./db";
+import { productVariants } from "../drizzle/schema";
+import {
+  adminOperationsRouter,
+  storefrontOperationsRouter,
+  transitionOrderStatus,
+} from "./admin-operations";
+import { localDateInTimezone, localTimeRangeStartToUtc } from "./time";
 import { COOKIE_NAME } from "@shared/const";
 import { ENV } from "./_core/env";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -111,14 +123,47 @@ async function publicProducts(
   db: Awaited<ReturnType<typeof getDb>>,
   rows: Array<{
     product: typeof products.$inferSelect;
-    categoryName: string | null;
-  }>
+      categoryName: string | null;
+    }>
 ) {
+  if (!db)
+    throw new TRPCError({
+      code: "SERVICE_UNAVAILABLE",
+      message: "The shop database is not configured or is currently unavailable.",
+    });
   const active = await currentOffers(db);
+  const ids = rows.map(({ product }) => product.id);
+  const variants = ids.length
+    ? await db
+        .select()
+        .from(productVariants)
+        .where(inArray(productVariants.productId, ids))
+    : [];
+  const variantsByProduct = new Map<number, typeof variants>();
+  for (const variant of variants) {
+    const current = variantsByProduct.get(variant.productId) ?? [];
+    current.push(variant);
+    variantsByProduct.set(variant.productId, current);
+  }
   return rows.map(({ product, categoryName }) => {
     const offer = active.get(product.id);
+    const productOptions = (variantsByProduct.get(product.id) ?? []).map(
+      variant => ({
+        ...variant,
+        effectivePricePaise: offer
+          ? priceAfterDiscount(variant.pricePaise, offer.discountPercent)
+          : variant.pricePaise,
+      })
+    );
+    const availableVariants = productOptions.filter(
+      variant => variant.isAvailable && variant.stock > 0
+    );
     return {
       ...product,
+      variants: productOptions,
+      stock: productOptions.length
+        ? availableVariants.reduce((sum, variant) => sum + variant.stock, 0)
+        : product.stock,
       categoryName: categoryName ?? "Cakes",
       offer: offer
         ? {
@@ -157,9 +202,10 @@ const profileInput = z.object({
 });
 const checkoutInput = z.object({
   items: z
-    .array(
+  .array(
       z.object({
         productId: z.number().int().positive(),
+        variantId: z.number().int().positive().optional(),
         quantity: z.number().int().min(1).max(20),
       })
     )
@@ -168,7 +214,8 @@ const checkoutInput = z.object({
   customerName: z.string().trim().min(2).max(120),
   customerPhone: phone,
   customerEmail: email.optional().default(""),
-  deliveryAddress: z.string().trim().min(8).max(800),
+  deliveryAddress: z.string().trim().max(800).optional().default(""),
+  fulfillmentMethod: z.enum(["delivery", "pickup"]).default("delivery"),
   deliveryDate: dateString,
   deliveryTime: z.string().trim().min(2).max(40),
   instructions: z.string().trim().max(1000).optional(),
@@ -177,6 +224,7 @@ const checkoutInput = z.object({
 
 export const appRouter = router({
   system: systemRouter,
+  storefront: storefrontOperationsRouter,
   auth: router({
     me: publicProcedure.query(({ ctx }) => ctx.user),
     updateProfile: protectedProcedure
@@ -419,17 +467,66 @@ export const appRouter = router({
       .input(checkoutInput)
       .mutation(async ({ ctx, input }) => {
         const db = await database();
-        const code = `CKR-${nanoid(10).toUpperCase()}`;
-        const now = new Date();
-        if (input.deliveryDate < new Date().toISOString().slice(0, 10))
+        const [storedSettings] = await db
+          .select()
+          .from(businessSettings)
+          .where(eq(businessSettings.id, 1))
+          .limit(1);
+        const settings = storedSettings ?? {
+          businessAddress:
+            "Ayesha Tower, S.V. Road, Opp. MTNL, Jogeshwari West, Mumbai 400060.",
+          deliveryEnabled: true,
+          pickupEnabled: true,
+          deliveryFeePaise: 4900,
+          freeDeliveryThresholdPaise: 79900,
+          acceptingOrders: true,
+          allowedPaymentMethods: "cod,pay_at_store",
+          notifyNewOrders: true,
+          timezone: "Asia/Kolkata",
+        };
+        if (!settings.acceptingOrders)
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Online orders are paused. Please contact the bakery.",
+          });
+        if (
+          (input.fulfillmentMethod === "delivery" && !settings.deliveryEnabled) ||
+          (input.fulfillmentMethod === "pickup" && !settings.pickupEnabled)
+        )
           throw new TRPCError({
             code: "BAD_REQUEST",
-            message: "Choose a future delivery date.",
+            message: "That fulfilment option is currently unavailable.",
           });
+        if (
+          input.fulfillmentMethod === "delivery" &&
+          input.deliveryAddress.trim().length < 8
+        )
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Enter a delivery address of at least 8 characters.",
+          });
+        if (!settings.allowedPaymentMethods.split(",").includes(input.paymentMethod))
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "That payment method is currently unavailable.",
+          });
+        const code = `CKR-${nanoid(10).toUpperCase()}`;
+        const timeZone = settings.timezone ?? "Asia/Kolkata";
+        if (input.deliveryDate <= localDateInTimezone(new Date(), timeZone))
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Choose a future pickup or delivery date.",
+          });
+        let requestedAt: Date;
+        try {
+          requestedAt = localTimeRangeStartToUtc(input.deliveryDate, input.deliveryTime, timeZone);
+        } catch (error) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: error instanceof Error ? error.message : "Choose a valid pickup or delivery time." });
+        }
         const result = await db.transaction(async tx => {
           const ids = input.items.map(item => item.productId);
           const rows = await tx
-            .select({ product: products, categoryName: categories.name })
+            .select({ product: products, categoryName: categories.name, categoryIsActive: categories.isActive })
             .from(products)
             .leftJoin(categories, eq(products.categoryId, categories.id))
             .where(inArray(products.id, ids));
@@ -438,6 +535,15 @@ export const appRouter = router({
               code: "BAD_REQUEST",
               message: "One or more cakes are no longer available.",
             });
+          const variantIds = input.items
+            .map(item => item.variantId)
+            .filter((id): id is number => id !== undefined);
+          const variantRows = variantIds.length
+            ? await tx
+                .select()
+                .from(productVariants)
+                .where(inArray(productVariants.id, variantIds))
+            : [];
           const active = await currentOffers(
             tx as unknown as Awaited<ReturnType<typeof getDb>>
           );
@@ -446,18 +552,38 @@ export const appRouter = router({
               candidate => candidate.product.id === item.productId
             )!;
             const product = row.product;
-            if (!product.isAvailable || product.stock < item.quantity)
+            const variant = item.variantId
+              ? variantRows.find(candidate => candidate.id === item.variantId)
+              : undefined;
+            if (item.variantId && (!variant || variant.productId !== product.id))
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "One of the selected cake sizes is no longer available.",
+              });
+            const stock = variant ? variant.stock : product.stock;
+            if (
+              !product.isAvailable ||
+              row.categoryIsActive !== true ||
+              (variant && (!variant.isAvailable || variant.stock <= 0)) ||
+              stock < item.quantity
+            )
               throw new TRPCError({
                 code: "CONFLICT",
-                message: `${product.name} has only ${product.stock} available.`,
+                message: `${product.name}${variant ? ` (${variant.name})` : ""} has only ${stock} available.`,
               });
+            const requiredLeadHours = Math.max(product.advanceOrderHours, Math.ceil(product.preparationMinutes / 60));
+            if (requestedAt.getTime() < Date.now() + requiredLeadHours * 60 * 60 * 1000)
+              throw new TRPCError({ code: "BAD_REQUEST", message: `${product.name} needs at least ${requiredLeadHours} hours of advance notice.` });
             const discount = active.get(product.id)?.discountPercent ?? 0;
+            const basePrice = variant?.pricePaise ?? product.pricePaise;
             const unitPricePaise = discount
-              ? priceAfterDiscount(product.pricePaise, discount)
-              : product.pricePaise;
+              ? priceAfterDiscount(basePrice, discount)
+              : basePrice;
             return {
               productId: product.id,
+              variantId: variant?.id ?? null,
               productNameSnapshot: product.name,
+              variantNameSnapshot: variant?.name ?? null,
               productImageSnapshot: product.imageUrl,
               unitPricePaise,
               quantity: item.quantity,
@@ -468,7 +594,11 @@ export const appRouter = router({
             (sum, item) => sum + item.lineTotalPaise,
             0
           );
-          const deliveryFeePaise = subtotalPaise >= 79900 ? 0 : 4900;
+          const deliveryFeePaise =
+            input.fulfillmentMethod === "pickup" ||
+            subtotalPaise >= settings.freeDeliveryThresholdPaise
+              ? 0
+              : settings.deliveryFeePaise;
           const totalPaise = subtotalPaise + deliveryFeePaise;
           await tx
             .insert(orders)
@@ -478,7 +608,11 @@ export const appRouter = router({
               customerName: input.customerName,
               customerPhone: input.customerPhone,
               customerEmail: input.customerEmail || null,
-              deliveryAddress: input.deliveryAddress,
+              deliveryAddress:
+                input.fulfillmentMethod === "delivery"
+                  ? input.deliveryAddress
+                  : `Pickup at ${settings.businessAddress}`,
+              fulfillmentMethod: input.fulfillmentMethod,
               deliveryDate: input.deliveryDate,
               deliveryTime: input.deliveryTime,
               instructions: input.instructions || null,
@@ -501,20 +635,49 @@ export const appRouter = router({
           await tx
             .insert(orderItems)
             .values(lineItems.map(item => ({ ...item, orderId: created.id })));
+          await tx.insert(orderStatusHistory).values({
+            orderId: created.id,
+            fromStatus: null,
+            toStatus: "Order Placed",
+            changedBy: ctx.user?.id ?? null,
+          });
+          if (settings.notifyNewOrders)
+            await tx.insert(adminNotifications).values({
+              kind: "order",
+              entityId: created.id,
+              title: "New cake order",
+              body: `${input.customerName} placed ${code}.`,
+            });
           for (const item of input.items) {
-            const changed = await tx
-              .update(products)
-              .set({
-                stock: sql`${products.stock} - ${item.quantity}`,
-                popularity: sql`${products.popularity} + ${item.quantity}`,
-              })
-              .where(
-                and(
-                  eq(products.id, item.productId),
-                  gte(products.stock, item.quantity),
-                  eq(products.isAvailable, true)
-                )
-              );
+            const changed = item.variantId
+              ? await tx
+                  .update(productVariants)
+                  .set({ stock: sql`${productVariants.stock} - ${item.quantity}` })
+                  .where(
+                    and(
+                      eq(productVariants.id, item.variantId),
+                      gte(productVariants.stock, item.quantity),
+                      eq(productVariants.isAvailable, true)
+                    )
+                  )
+              : await tx
+                  .update(products)
+                  .set({
+                    stock: sql`${products.stock} - ${item.quantity}`,
+                    popularity: sql`${products.popularity} + ${item.quantity}`,
+                  })
+                  .where(
+                    and(
+                      eq(products.id, item.productId),
+                      gte(products.stock, item.quantity),
+                      eq(products.isAvailable, true)
+                    )
+                  );
+            if (item.variantId)
+              await tx
+                .update(products)
+                .set({ popularity: sql`${products.popularity} + ${item.quantity}` })
+                .where(eq(products.id, item.productId));
             const affectedRows = Number(
               (changed as unknown as [{ affectedRows?: number }])[0]
                 ?.affectedRows ?? 0
@@ -525,6 +688,15 @@ export const appRouter = router({
                 message:
                   "Stock changed during checkout. Please review your cart.",
               });
+            await tx.insert(productStockMovements).values({
+              productId: item.productId,
+              variantId: item.variantId ?? null,
+              kind: "order",
+              quantity: item.quantity,
+              delta: -item.quantity,
+              note: `Stock reserved for customer order ${code}.`,
+              recordedBy: ctx.user?.id ?? null,
+            });
           }
           return {
             orderCode: code,
@@ -636,7 +808,7 @@ export const appRouter = router({
             message: "Choose a future date.",
           });
         const db = await database();
-        await db
+        const created = await db
           .insert(customCakeEnquiries)
           .values({
             customerName: input.customerName,
@@ -652,6 +824,21 @@ export const appRouter = router({
             additionalInstructions: input.additionalInstructions || null,
             status: "pending",
           });
+        const enquiryId = Number(
+          (created as unknown as [{ insertId?: number }])[0]?.insertId ?? 0
+        );
+        const [settings] = await db
+          .select({ notifyNewEnquiries: businessSettings.notifyNewEnquiries })
+          .from(businessSettings)
+          .where(eq(businessSettings.id, 1))
+          .limit(1);
+        if (enquiryId && settings?.notifyNewEnquiries !== false)
+          await db.insert(adminNotifications).values({
+            kind: "custom_enquiry",
+            entityId: enquiryId,
+            title: "New custom cake request",
+            body: `${input.customerName} requested a ${input.flavour} cake.`,
+          });
         return {
           success: true,
           message:
@@ -661,6 +848,7 @@ export const appRouter = router({
   }),
 
   admin: router({
+    ops: adminOperationsRouter,
     dashboard: adminProcedure.query(async () => {
       const db = await database();
       const [
@@ -746,6 +934,7 @@ export const appRouter = router({
             name: users.name,
             email: users.email,
             phone: users.phone,
+            adminNotes: users.adminNotes,
             createdAt: users.createdAt,
             lastSignedIn: users.lastSignedIn,
           })
@@ -758,7 +947,8 @@ export const appRouter = router({
           .select({
             userId: orders.userId,
             orderCount: count(),
-            orderValuePaise: sql<number>`coalesce(sum(case when ${orders.status} <> 'Cancelled' then ${orders.totalPaise} else 0 end), 0)`,
+            orderValuePaise: sql<number>`coalesce(sum(case when ${orders.status} = 'Delivered' then ${orders.totalPaise} else 0 end), 0)`,
+            recentOrderAt: sql<Date | null>`max(${orders.createdAt})`,
           })
           .from(orders)
           .where(
@@ -773,6 +963,7 @@ export const appRouter = router({
           ...record,
           orderCount: Number(byUser.get(record.id)?.orderCount ?? 0),
           orderValuePaise: Number(byUser.get(record.id)?.orderValuePaise ?? 0),
+          recentOrderAt: byUser.get(record.id)?.recentOrderAt ?? null,
         }));
       }),
     uploadProductImage: adminProcedure
@@ -868,16 +1059,21 @@ export const appRouter = router({
           imageUrl: safeImage,
           priceRupees: z.number().int().min(1).max(200000),
           stock: z.number().int().min(0).max(10000),
+          eggOption: z.enum(["eggless", "contains_egg", "choice"]).default("choice"),
+          customizationOptions: z.string().trim().max(2000).optional(),
+          preparationMinutes: z.number().int().min(0).max(10080).default(240),
+          advanceOrderHours: z.number().int().min(0).max(720).default(24),
           isAvailable: z.boolean(),
           isNew: z.boolean(),
           isFeatured: z.boolean(),
         })
       )
-      .mutation(async ({ input }) => {
+      .mutation(async ({ ctx, input }) => {
         const db = await database();
-        await db
-          .insert(products)
-          .values({
+        return db.transaction(async tx => {
+          const [category] = await tx.select({ id: categories.id }).from(categories).where(and(eq(categories.id, input.categoryId), eq(categories.isActive, true))).limit(1);
+          if (!category) throw new TRPCError({ code: "BAD_REQUEST", message: "Choose an active product category." });
+          const result = await tx.insert(products).values({
             categoryId: input.categoryId,
             name: input.name,
             slug: input.slug,
@@ -885,12 +1081,19 @@ export const appRouter = router({
             imageUrl: input.imageUrl,
             pricePaise: input.priceRupees * 100,
             stock: input.stock,
+            eggOption: input.eggOption,
+            customizationOptions: input.customizationOptions || null,
+            preparationMinutes: input.preparationMinutes,
+            advanceOrderHours: input.advanceOrderHours,
             isAvailable: input.isAvailable,
             isNew: input.isNew,
             isFeatured: input.isFeatured,
             popularity: 0,
           });
-        return { success: true };
+          const productId = Number((result as unknown as [{ insertId?: number }])[0]?.insertId ?? 0);
+          if (input.stock > 0 && productId) await tx.insert(productStockMovements).values({ productId, kind: "initial", quantity: input.stock, delta: input.stock, note: "Initial cake stock recorded.", recordedBy: ctx.user.id });
+          return { success: true };
+        });
       }),
     updateProduct: adminProcedure
       .input(
@@ -908,26 +1111,40 @@ export const appRouter = router({
           imageUrl: safeImage,
           priceRupees: z.number().int().min(1).max(200000),
           stock: z.number().int().min(0).max(10000),
+          eggOption: z.enum(["eggless", "contains_egg", "choice"]).default("choice"),
+          customizationOptions: z.string().trim().max(2000).optional(),
+          preparationMinutes: z.number().int().min(0).max(10080).default(240),
+          advanceOrderHours: z.number().int().min(0).max(720).default(24),
           isAvailable: z.boolean(),
           isNew: z.boolean(),
           isFeatured: z.boolean(),
         })
       )
-      .mutation(async ({ input }) => {
+      .mutation(async ({ ctx, input }) => {
         const db = await database();
         const { id, priceRupees, ...values } = input;
-        await db
-          .update(products)
-          .set({ ...values, pricePaise: priceRupees * 100 })
-          .where(eq(products.id, id));
-        return { success: true };
+        return db.transaction(async tx => {
+          const [current] = await tx.select().from(products).where(eq(products.id, id)).for("update").limit(1);
+          if (!current) throw new TRPCError({ code: "NOT_FOUND", message: "Cake product not found." });
+          const [category] = await tx.select({ id: categories.id }).from(categories).where(and(eq(categories.id, input.categoryId), eq(categories.isActive, true))).limit(1);
+          if (!category) throw new TRPCError({ code: "BAD_REQUEST", message: "Choose an active product category." });
+          const delta = input.stock - current.stock;
+          await tx.update(products).set({ ...values, pricePaise: priceRupees * 100, customizationOptions: input.customizationOptions || null }).where(eq(products.id, id));
+          if (delta !== 0) await tx.insert(productStockMovements).values({ productId: id, kind: "adjustment", quantity: Math.abs(delta), delta, note: "Cake stock count changed in product details.", recordedBy: ctx.user.id });
+          return { success: true };
+        });
       }),
     deleteProduct: adminProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ input }) => {
         const db = await database();
-        await db.delete(products).where(eq(products.id, input.id));
-        return { success: true };
+        return db.transaction(async tx => {
+          const [product] = await tx.select({ id: products.id }).from(products).where(eq(products.id, input.id)).for("update").limit(1);
+          if (!product) throw new TRPCError({ code: "NOT_FOUND", message: "Cake product not found." });
+          await tx.update(products).set({ isAvailable: false }).where(eq(products.id, input.id));
+          await tx.update(productVariants).set({ isAvailable: false }).where(eq(productVariants.productId, input.id));
+          return { success: true, archived: true };
+        });
       }),
     orders: adminProcedure
       .input(
@@ -975,23 +1192,29 @@ export const appRouter = router({
           .select()
           .from(orderItems)
           .where(eq(orderItems.orderId, order.id));
-        return { ...order, items };
+        const [payments, history] = await Promise.all([
+          db
+            .select()
+            .from(paymentRecords)
+            .where(eq(paymentRecords.orderId, order.id))
+            .orderBy(desc(paymentRecords.createdAt)),
+          db
+            .select()
+            .from(orderStatusHistory)
+            .where(eq(orderStatusHistory.orderId, order.id))
+            .orderBy(asc(orderStatusHistory.createdAt)),
+        ]);
+        return { ...order, items, payments, history };
       }),
     updateOrderStatus: adminProcedure
       .input(
         z.object({
           id: z.number().int().positive(),
           status: z.enum(orderStatusValues),
+          note: z.string().trim().max(500).optional(),
         })
       )
-      .mutation(async ({ input }) => {
-        const db = await database();
-        await db
-          .update(orders)
-          .set({ status: input.status })
-          .where(eq(orders.id, input.id));
-        return { success: true };
-      }),
+      .mutation(async ({ ctx, input }) => transitionOrderStatus(input, ctx.user.id)),
     offers: adminProcedure.query(async () => {
       const db = await database();
       return db
